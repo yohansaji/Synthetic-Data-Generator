@@ -8,6 +8,21 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.neighbors import NearestNeighbors
 import io
 
+# Add this helper function at the top after imports
+def fix_nullable_dtypes(df):
+    """Convert nullable integer/boolean types to standard types for PyArrow compatibility"""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype.name in ['Int64', 'Int32', 'Int16', 'Int8', 'boolean']:
+            # Convert nullable int to standard float (preserves NaN) or int if no nulls
+            if df[col].isna().any():
+                df[col] = df[col].astype('float64')
+            else:
+                df[col] = df[col].astype('int64')
+        elif df[col].dtype.name == 'string':
+            df[col] = df[col].astype('object')
+    return df
+
 # Page config
 st.set_page_config(page_title="CTGAN Synthetic Data Generator", layout="wide")
 
@@ -34,13 +49,13 @@ if uploaded_file is not None:
     
     st.success(f"✅ File uploaded successfully! Shape: {data.shape}")
     
-    # Display basic info
+    # Display basic info - FIX APPLIED HERE
     with st.expander("📊 View Original Data", expanded=False):
-        st.dataframe(data.head(20))
+        st.dataframe(fix_nullable_dtypes(data.head(20)))
         st.write("**Data Types:**")
         st.write(data.dtypes)
         st.write("**Basic Statistics:**")
-        st.write(data.describe())
+        st.dataframe(fix_nullable_dtypes(data.describe()))
     
     # Anonymization options
     st.sidebar.subheader("🔒 Anonymization")
@@ -126,6 +141,9 @@ if uploaded_file is not None:
                 
                 # Generate synthetic data
                 synthetic_data = ctgan.sample(int(num_samples))
+                
+                # FIX APPLIED HERE - Convert nullable dtypes before storing
+                synthetic_data = fix_nullable_dtypes(synthetic_data)
                 st.session_state.synthetic_data = synthetic_data
                 
                 st.success("✅ Synthetic data generated successfully!")
@@ -162,11 +180,11 @@ if uploaded_file is not None:
                 
                 with col1:
                     st.write("**Original Data**")
-                    st.dataframe(data_processed[numerical_cols].describe().T)
+                    st.dataframe(fix_nullable_dtypes(data_processed[numerical_cols].describe().T))
                 
                 with col2:
                     st.write("**Synthetic Data**")
-                    st.dataframe(synthetic_data[numerical_cols].describe().T)
+                    st.dataframe(fix_nullable_dtypes(synthetic_data[numerical_cols].describe().T))
             else:
                 st.info("No numerical columns for statistical comparison")
         
@@ -177,11 +195,11 @@ if uploaded_file is not None:
                 
                 with col1:
                     st.write("**Original Data Correlation**")
-                    st.dataframe(data_processed[numerical_cols].corr())
+                    st.dataframe(fix_nullable_dtypes(data_processed[numerical_cols].corr()))
                 
                 with col2:
                     st.write("**Synthetic Data Correlation**")
-                    st.dataframe(synthetic_data[numerical_cols].corr())
+                    st.dataframe(fix_nullable_dtypes(synthetic_data[numerical_cols].corr()))
             else:
                 st.info("Need at least 2 numerical columns for correlation analysis")
         
@@ -192,6 +210,10 @@ if uploaded_file is not None:
                 try:
                     # Convert to matrix
                     def to_matrix(real_df, synthetic_df, cat_cols, num_cols):
+                        # Convert both dataframes to fix nullable dtypes
+                        real_df = fix_nullable_dtypes(real_df)
+                        synthetic_df = fix_nullable_dtypes(synthetic_df)
+                        
                         all_cat_data = pd.concat([real_df[cat_cols], synthetic_df[cat_cols]], axis=0) if cat_cols else pd.DataFrame()
                         
                         if not all_cat_data.empty:
@@ -225,10 +247,13 @@ if uploaded_file is not None:
                     with col3:
                         st.metric("Max NN Distance", f"{np.max(dists):.4f}")
                     
-                    # Exact duplicates
+                    # Exact duplicates - FIX APPLIED HERE
+                    real_fixed = fix_nullable_dtypes(data_processed.reset_index(drop=True))
+                    synth_fixed = fix_nullable_dtypes(synthetic_data.reset_index(drop=True))
+                    
                     exact_overlap = pd.merge(
-                        data_processed.reset_index(drop=True),
-                        synthetic_data.reset_index(drop=True),
+                        real_fixed,
+                        synth_fixed,
                         how='inner'
                     ).shape[0]
                     
@@ -249,8 +274,9 @@ if uploaded_file is not None:
         if st.button("📋 Generate Detailed Profile Reports (HTML)", type="secondary"):
             with st.spinner("Generating profile reports... This may take a while."):
                 try:
-                    profile_real = ProfileReport(data_processed, title='Profile: Real Data', minimal=True)
-                    profile_synth = ProfileReport(synthetic_data, title='Profile: Synthetic Data', minimal=True)
+                    # FIX APPLIED HERE - Convert dtypes before profiling
+                    profile_real = ProfileReport(fix_nullable_dtypes(data_processed), title='Profile: Real Data', minimal=True)
+                    profile_synth = ProfileReport(fix_nullable_dtypes(synthetic_data), title='Profile: Synthetic Data', minimal=True)
                     
                     # Save to buffer
                     real_html = profile_real.to_html()
