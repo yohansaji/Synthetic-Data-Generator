@@ -1,8 +1,23 @@
-streamlit
-pandas
-numpy
-ctgan
-sdv
-ydata-profiling
-Faker
-scikit-learn
+# Core dependencies
+streamlit==1.51.0
+pandas==2.2.3
+numpy==1.26.4
+
+# CTGAN and SDV ecosystem
+ctgan==0.10.1
+sdv==1.9.0
+rdt==1.12.1
+
+# Data profiling
+ydata-profiling==4.6.4
+
+# Utilities
+Faker==22.6.0
+scikit-learn==1.4.2
+
+# PyArrow - downgraded for compatibility
+pyarrow==15.0.2
+
+# Additional profiling dependencies
+pydantic==2.5.3
+typeguard==4.1.5
