@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+ctgan
+sdv
+ydata-profiling
+scikit-learn
+faker
