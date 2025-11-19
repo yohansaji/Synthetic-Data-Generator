@@ -1,8 +1,8 @@
-streamlit
-pandas
-numpy
-ctgan
-sdv
-ydata-profiling
-scikit-learn
-faker
+streamlit==1.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+ctgan==0.10.1
+sdv==1.9.0
+ydata-profiling==4.6.4
+Faker==22.6.0
+scikit-learn>=1.3.0
