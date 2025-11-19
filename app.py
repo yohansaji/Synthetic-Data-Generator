@@ -2,167 +2,158 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from ctgan import CTGAN
+from ydata_profiling import ProfileReport
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.neighbors import NearestNeighbors
-from sklearn.impute import SimpleImputer
-from ydata_profiling import ProfileReport
 from io import BytesIO
 
-st.set_page_config(page_title="CTGAN Synthetic Data Generator", layout="wide")
-st.title("📊 CTGAN Synthetic Data Generator")
-st.write("Upload ANY CSV → Clean → Fix Missing → Generate Synthetic Data")
+# ----------------------------------------------
+# PAGE SETUP
+# ----------------------------------------------
+st.set_page_config(page_title="Synthetic Data Generator", layout="wide")
+st.title("📊 Synthetic Data Generator using CTGAN")
+st.write("Upload ANY dataset (CSV) and generate high-quality synthetic data.")
 
-# -------------------------------------------------------------
+# ----------------------------------------------
 # FILE UPLOAD
-# -------------------------------------------------------------
-file = st.file_uploader("Upload CSV file", type=["csv"])
-if file is None:
-    st.stop()
+# ----------------------------------------------
+uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
 
-df_raw = pd.read_csv(file)
-st.subheader("Original Data")
-st.dataframe(df_raw.head())
+if uploaded_file:
+    data = pd.read_csv(uploaded_file)
+    st.subheader("🔍 Original Data Preview")
+    st.dataframe(data.head())
 
-# -------------------------------------------------------------
-# STEP 1 — Remove Identifier Columns
-# -------------------------------------------------------------
-id_keywords = [
-    'id', 'name', 'email', 'phone', 'mobile', 'contact',
-    'reg', 'roll', 'aadhar', 'address', 'passport'
-]
+    st.write(f"Rows: {data.shape[0]}, Columns: {data.shape[1]}")
 
-id_cols = [c for c in df_raw.columns if any(k in c.lower() for k in id_keywords)]
+    # ----------------------------------------------
+    # REMOVE ID-LIKE COLUMNS
+    # ----------------------------------------------
+    id_keywords = ['id','ssn','passport','email','phone','mobile','contact',
+                   'roll','reg','aadhar','address','name']
+    possible_ids = [c for c in data.columns if any(k in c.lower() for k in id_keywords)]
 
-df = df_raw.drop(columns=id_cols, errors="ignore")
+    data_clean = data.drop(columns=possible_ids, errors='ignore')
 
-if id_cols:
-    st.warning(f"Dropped ID-like columns: {id_cols}")
+    st.success(f"Removed ID-like columns: {possible_ids}")
 
-# -------------------------------------------------------------
-# STEP 2 — Type Detection
-# -------------------------------------------------------------
-categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # ----------------------------------------------
+    # TYPE DETECTION
+    # ----------------------------------------------
+    categorical_cols = data_clean.select_dtypes(include=['object','category','bool']).columns.tolist()
+    numerical_cols = data_clean.select_dtypes(include=[np.number]).columns.tolist()
 
-# -------------------------------------------------------------
-# STEP 3 — Drop High Cardinality Columns (Prevents CTGAN crash)
-# -------------------------------------------------------------
-high_card = [c for c in categorical_cols if df[c].nunique() > len(df) * 0.5]
+    st.write("Categorical Columns:", categorical_cols)
+    st.write("Numerical Columns:", numerical_cols)
 
-if high_card:
-    st.warning(f"Dropped high-cardinality columns: {high_card}")
+    # ----------------------------------------------
+    # HANDLE MISSING VALUES
+    # ----------------------------------------------
+    for c in numerical_cols:
+        if data_clean[c].isna().any():
+            data_clean[c] = data_clean[c].fillna(data_clean[c].median())
 
-df = df.drop(columns=high_card, errors='ignore')
-
-# Refresh column lists
-categorical_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
-st.write("Categorical columns:", categorical_cols)
-st.write("Numeric columns:", numeric_cols)
-
-
-# -------------------------------------------------------------
-# STEP 4 — FIX MISSING VALUES (NO-FAIL VERSION)
-# -------------------------------------------------------------
-st.subheader("Fixing Missing Values (Guaranteed No NaN)")
-
-# --- NUMERIC ---
-if numeric_cols:
-    num_imp = SimpleImputer(strategy="median")
-    df[numeric_cols] = num_imp.fit_transform(df[numeric_cols])
-
-# --- CATEGORICAL ---
-if categorical_cols:
     for c in categorical_cols:
-        df[c] = df[c].astype("category")
-        if "__MISSING__" not in df[c].cat.categories:
-            df[c] = df[c].cat.add_categories(["__MISSING__"])
-        df[c] = df[c].fillna("__MISSING__")
+        data_clean[c] = data_clean[c].astype('category')
+        if data_clean[c].isna().any():
+            data_clean[c] = data_clean[c].cat.add_categories(['__MISSING__']).fillna('__MISSING__')
 
-# --- GLOBAL SAFETY NET ---
-df = df.replace({np.nan: "__MISSING__"})
+    st.info("Missing values cleaned.")
 
-# Double check
-if df.isna().sum().sum() == 0:
-    st.success("All missing values removed. CTGAN-ready.")
-else:
-    st.error("ERROR: NaNs still exist — stopping for safety.")
-    st.stop()
+    # ----------------------------------------------
+    # TRAIN CTGAN
+    # ----------------------------------------------
+    st.subheader("🤖 Training CTGAN Model")
+    epochs = st.slider("Training Epochs", 50, 500, 200)
 
-# -------------------------------------------------------------
-# STEP 5 — Train CTGAN
-# -------------------------------------------------------------
-st.subheader("Train CTGAN Model")
-epochs = st.slider("Epochs", 50, 300, 150)
-
-if st.button("Train CTGAN"):
-    with st.spinner("Training CTGAN... please wait"):
-        try:
+    if st.button("Train Model"):
+        with st.spinner("Training CTGAN... may take a few minutes"):
             ctgan = CTGAN(epochs=epochs, verbose=True)
-            ctgan.fit(df, categorical_cols)
-        except Exception as e:
-            st.error("CTGAN training failed:")
-            st.error(str(e))
-            st.stop()
+            ctgan.fit(data_clean, categorical_cols)
 
-    st.success("CTGAN training complete!")
+        st.success("Model Trained Successfully!")
 
-    # ---------------------------------------------------------
-    # STEP 6 — Generate Synthetic Data
-    # ---------------------------------------------------------
-    synthetic = ctgan.sample(len(df))
+        # ----------------------------------------------
+        # GENERATE SYNTHETIC DATA
+        # ----------------------------------------------
+        num_rows = len(data_clean)
+        synthetic_data = ctgan.sample(num_rows)
 
-    st.subheader("Synthetic Data Preview")
-    st.dataframe(synthetic.head())
+        st.subheader("🧪 Synthetic Data Preview")
+        st.dataframe(synthetic_data.head())
 
-    # Download CSV
-    buf = BytesIO()
-    synthetic.to_csv(buf, index=False)
-    st.download_button(
-        "Download Synthetic CSV",
-        buf.getvalue(),
-        "synthetic_data.csv",
-        "text/csv"
-    )
+        # ----------------------------------------------
+        # DOWNLOAD SYNTHETIC DATA
+        # ----------------------------------------------
+        csv_buffer = BytesIO()
+        synthetic_data.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="⬇️ Download Synthetic Data",
+            data=csv_buffer.getvalue(),
+            file_name="synthetic_data.csv",
+            mime="text/csv"
+        )
 
-    # ---------------------------------------------------------
-    # STEP 7 — Privacy Check
-    # ---------------------------------------------------------
-    st.subheader("🔐 Privacy Check")
+        # ----------------------------------------------
+        # GENERATE PROFILES
+        # ----------------------------------------------
+        st.subheader("📈 Profiling Reports")
 
-    def to_matrix(real, syn, cat_cols, num_cols):
-        # Encode categoricals
-        if cat_cols:
+        if st.button("Generate Profiling Reports"):
+            with st.spinner("Generating Reports..."):
+                profile_real = ProfileReport(data_clean, title="Real Data", minimal=True)
+                profile_synth = ProfileReport(synthetic_data, title="Synthetic Data", minimal=True)
+
+                profile_real.to_file("real_profile.html")
+                profile_synth.to_file("synthetic_profile.html")
+
+            st.success("Reports Generated!")
+
+            st.download_button(
+                "⬇️ Download Real Data Profile",
+                data=open("real_profile.html","rb").read(),
+                file_name="real_profile.html"
+            )
+
+            st.download_button(
+                "⬇️ Download Synthetic Data Profile",
+                data=open("synthetic_profile.html","rb").read(),
+                file_name="synthetic_profile.html"
+            )
+
+        # ----------------------------------------------
+        # PRIVACY CHECK
+        # ----------------------------------------------
+        st.subheader("🔒 Privacy Check")
+
+        def to_matrix(real_df, synth_df, cat_cols, num_cols):
+            all_cat = pd.concat([real_df[cat_cols], synth_df[cat_cols]], axis=0)
             enc = OneHotEncoder(handle_unknown='ignore')
-            all_cat = pd.concat([real[cat_cols], syn[cat_cols]], axis=0)
             enc.fit(all_cat)
 
-            R_cat = enc.transform(real[cat_cols]).toarray()
-            S_cat = enc.transform(syn[cat_cols]).toarray()
-        else:
-            R_cat = np.zeros((len(real), 0))
-            S_cat = np.zeros((len(syn), 0))
+            X_real_cat = enc.transform(real_df[cat_cols]).toarray() if cat_cols else np.zeros((len(real_df),0))
+            X_syn_cat = enc.transform(synth_df[cat_cols]).toarray() if cat_cols else np.zeros((len(synth_df),0))
 
-        # Numeric
-        R_num = real[num_cols].to_numpy() if num_cols else np.zeros((len(real), 0))
-        S_num = syn[num_cols].to_numpy() if num_cols else np.zeros((len(syn), 0))
+            X_real_num = real_df[num_cols].to_numpy() if num_cols else np.zeros((len(real_df),0))
+            X_syn_num = synth_df[num_cols].to_numpy() if num_cols else np.zeros((len(synthetic_data),0))
 
-        return np.hstack([R_num, R_cat]), np.hstack([S_num, S_cat])
+            return np.hstack([X_real_num, X_real_cat]), np.hstack([X_syn_num, X_syn_cat])
 
-    X_real, X_syn = to_matrix(df, synthetic, categorical_cols, numeric_cols)
+        X_real, X_syn = to_matrix(data_clean, synthetic_data, categorical_cols, numerical_cols)
 
-    nn = NearestNeighbors(n_neighbors=1).fit(X_real)
-    dists, _ = nn.kneighbors(X_syn)
+        nn = NearestNeighbors(n_neighbors=1).fit(X_real)
+        dists, _ = nn.kneighbors(X_syn)
 
-    st.write("Min Distance:", float(np.min(dists)))
-    st.write("Median Distance:", float(np.median(dists)))
-    st.write("Max Distance:", float(np.max(dists)))
+        st.write("Nearest-neighbour distance statistics:")
+        st.write("Min:", np.min(dists))
+        st.write("Median:", np.median(dists))
+        st.write("Max:", np.max(dists))
 
-    exact = pd.merge(
-        df.reset_index(drop=True),
-        synthetic.reset_index(drop=True),
-        how="inner"
-    ).shape[0]
+        exact_overlap = pd.merge(
+            data_clean.reset_index(drop=True),
+            synthetic_data.reset_index(drop=True),
+            how='inner'
+        ).shape[0]
 
-    st.write("Exact overlaps:", int(exact))
+        st.write("Exact overlapping rows:", exact_overlap)
+
