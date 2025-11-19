@@ -1,0 +1,13 @@
+[runner]
+fastReruns = true
+
+[server]
+maxUploadSize = 500
+enableXsrfProtection = true
+
+[client]
+showErrorDetails = true
+
+# Force dataframe conversion method
+[dataFrame]
+format = "legacy"
