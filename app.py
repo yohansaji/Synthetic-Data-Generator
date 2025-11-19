@@ -5,226 +5,149 @@ from ctgan import CTGAN
 from ydata_profiling import ProfileReport
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.neighbors import NearestNeighbors
-from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.impute import SimpleImputer
 from io import BytesIO
 
-# -----------------------------------------------------------
-# STREAMLIT PAGE SETUP
-# -----------------------------------------------------------
-st.set_page_config(page_title="Synthetic Data Generator", layout="wide")
-st.title("📊 Synthetic Data Generator using CTGAN")
-st.write("Upload ANY CSV dataset → Clean → Impute → Synthesize → Download results.")
+st.set_page_config(page_title="CTGAN Synthetic Data Generator", layout="wide")
+st.title("📊 CTGAN Synthetic Data Generator")
+st.write("Upload ANY CSV → Clean → Fix Missing → Generate Synthetic Data")
 
-uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
-
-if not uploaded_file:
-    st.info("Upload a CSV to begin.")
+# -------------------------------------------------------------
+# FILE UPLOAD
+# -------------------------------------------------------------
+file = st.file_uploader("Upload CSV file", type=["csv"])
+if file is None:
     st.stop()
 
-# -----------------------------------------------------------
-# LOAD DATA
-# -----------------------------------------------------------
-data_raw = pd.read_csv(uploaded_file)
+df_raw = pd.read_csv(file)
 st.subheader("Original Data")
-st.dataframe(data_raw.head())
-st.write(f"Rows: {data_raw.shape[0]}, Columns: {data_raw.shape[1]}")
+st.dataframe(df_raw.head())
 
-# -----------------------------------------------------------
-# ID-LIKE COLUMNS REMOVAL
-# -----------------------------------------------------------
-st.subheader("🔒 Removing Identifier-like Columns")
+# -------------------------------------------------------------
+# STEP 1 — Remove Identifier Columns Automatically
+# -------------------------------------------------------------
+id_keywords = ['id','name','email','phone','mobile','contact','reg','roll','aadhar','address','passport']
+id_cols = [c for c in df_raw.columns if any(k in c.lower() for k in id_keywords)]
 
-id_keywords = ['id', 'ssn', 'passport', 'email', 'phone', 'mobile', 'contact',
-               'roll', 'reg', 'aadhar', 'address', 'name']
+df = df_raw.drop(columns=id_cols, errors="ignore")
+if id_cols:
+    st.warning(f"Dropped identifier-like columns: {id_cols}")
 
-id_cols = [c for c in data_raw.columns if any(k in c.lower() for k in id_keywords)]
+# -------------------------------------------------------------
+# STEP 2 — Type Detection
+# -------------------------------------------------------------
+categorical_cols = df.select_dtypes(include=['object','category','bool']).columns.tolist()
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-data = data_raw.drop(columns=id_cols, errors='ignore')
+# -------------------------------------------------------------
+# STEP 3 — Drop High Cardinality Categorical Columns
+# -------------------------------------------------------------
+high_card_cols = [c for c in categorical_cols if df[c].nunique() > len(df) * 0.5]
+df = df.drop(columns=high_card_cols, errors="ignore")
 
-st.info(f"Removed ID-like columns: {id_cols}")
+if high_card_cols:
+    st.warning(f"Dropped high-cardinality columns (CTGAN cannot learn them): {high_card_cols}")
 
-# -----------------------------------------------------------
-# MISSING VALUES SUMMARY
-# -----------------------------------------------------------
-st.subheader("📉 Missing Value Summary")
+# Refresh categorical cols
+categorical_cols = df.select_dtypes(include=['object','category','bool']).columns.tolist()
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-missing_df = pd.DataFrame({
-    "missing_count": data.isna().sum(),
-    "missing_pct": (data.isna().sum() / len(data)) * 100,
-    "dtype": data.dtypes.astype(str)
-}).sort_values("missing_pct", ascending=False)
+st.write("Categorical columns:", categorical_cols)
+st.write("Numeric columns:", numeric_cols)
 
-st.dataframe(missing_df)
+# -------------------------------------------------------------
+# STEP 4 — Fix Missing Values (Guaranteed No-NaN Mode)
+# -------------------------------------------------------------
+st.subheader("Fixing Missing Values (Guaranteed no NaNs)")
 
-# -----------------------------------------------------------
-# DROP HIGH MISSINGNESS COLUMNS
-# -----------------------------------------------------------
-st.subheader("🚫 Drop Columns With Too Many Missing Values")
+# 1. Fill numeric NaNs with median
+if numeric_cols:
+    imp_num = SimpleImputer(strategy="median")
+    df[numeric_cols] = imp_num.fit_transform(df[numeric_cols])
 
-threshold = st.slider("Drop columns with % missing greater than:", 0, 100, 80)
-cols_drop_thresh = missing_df[missing_df["missing_pct"] > threshold].index.tolist()
+# 2. Fill categorical NaNs with __MISSING__
+if categorical_cols:
+    for c in categorical_cols:
+        df[c] = df[c].astype("category")
+        df[c] = df[c].fillna("__MISSING__")
 
-if cols_drop_thresh:
-    st.warning(f"Will drop columns: {cols_drop_thresh}")
+# FINAL SAFETY NET — remove ANY remaining nulls
+df = df.fillna("__MISSING__")
 
-data = data.drop(columns=cols_drop_thresh, errors='ignore')
-
-# -----------------------------------------------------------
-# TYPE DETECTION
-# -----------------------------------------------------------
-categorical_cols = data.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-numerical_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-
-st.write("Detected categorical columns:", categorical_cols)
-st.write("Detected numerical columns:", numerical_cols)
-
-# -----------------------------------------------------------
-# HIGH CARDINALITY DETECTION (fix for Name/Address/etc)
-# -----------------------------------------------------------
-st.subheader("🚫 Auto-remove High-Cardinality Columns (CTGAN cannot learn them)")
-
-high_cardinality_cols = [c for c in categorical_cols if data[c].nunique() > (0.5 * len(data))]
-
-if high_cardinality_cols:
-    st.warning(f"Dropping high-cardinality columns: {high_cardinality_cols}")
-
-data = data.drop(columns=high_cardinality_cols, errors='ignore')
-
-# Recompute categorical columns
-categorical_cols = data.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-
-# -----------------------------------------------------------
-# MISSING VALUE IMPUTATION
-# -----------------------------------------------------------
-st.subheader("🧼 Missing Value Handling")
-
-num_strategy = st.selectbox("Numeric Imputation Strategy",
-                            ["median", "mean", "knn", "interpolate", "drop_rows"])
-
-cat_strategy = st.selectbox("Categorical Imputation Strategy",
-                            ["__MISSING__", "mode", "drop_rows"])
-
-add_indicators = st.checkbox("Add missing-indicator columns", value=True)
-
-# Option: drop rows
-if num_strategy == "drop_rows" or cat_strategy == "drop_rows":
-    before = len(data)
-    data = data.dropna()
-    st.success(f"Dropped rows with missing values. {before} → {len(data)} rows left.")
-
-# Add missing flags
-if add_indicators:
-    for col in data.columns:
-        if data[col].isna().any():
-            data[f"{col}__missing_flag"] = data[col].isna().astype(int)
-
-# Numeric imputation
-if numerical_cols and num_strategy != "drop_rows":
-    try:
-        if num_strategy in ["median", "mean"]:
-            imp = SimpleImputer(strategy=num_strategy)
-            data[numerical_cols] = imp.fit_transform(data[numerical_cols])
-        elif num_strategy == "knn":
-            imp = KNNImputer(n_neighbors=5)
-            data[numerical_cols] = imp.fit_transform(data[numerical_cols])
-        elif num_strategy == "interpolate":
-            data[numerical_cols] = data[numerical_cols].interpolate(limit_direction="both")
-            data[numerical_cols] = data[numerical_cols].fillna(data[numerical_cols].median())
-        st.success("Numeric missing values imputed successfully.")
-    except Exception as e:
-        st.error(f"Numeric imputation error: {e}")
-
-# Categorical imputation
-if categorical_cols and cat_strategy != "drop_rows":
-    for col in categorical_cols:
-        data[col] = data[col].astype("category")
-        if data[col].isna().any():
-            if cat_strategy == "__MISSING__":
-                data[col] = data[col].cat.add_categories(["__MISSING__"]).fillna("__MISSING__")
-            else:
-                mode_val = data[col].mode(dropna=True)[0]
-                data[col] = data[col].fillna(mode_val)
-
-st.success("Missing value handling complete.")
-
-# -----------------------------------------------------------
-# FINAL VALIDATION FOR CTGAN
-# -----------------------------------------------------------
-st.subheader("✔ Final Validation Before CTGAN")
-
-categorical_cols = data.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-numerical_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-
-st.write("Final Categorical:", categorical_cols)
-st.write("Final Numeric:", numerical_cols)
-
-# CTGAN cannot train if no numeric + no categorical
-if len(categorical_cols) == 0 and len(numerical_cols) == 0:
-    st.error("No usable columns left for CTGAN. Upload a different dataset.")
+# Ensure NO NaN remains
+if df.isna().sum().sum() == 0:
+    st.success("All missing values removed successfully — dataset is CTGAN-safe.")
+else:
+    st.error("ERROR: NaNs still exist. Something is wrong.")
     st.stop()
 
-# -----------------------------------------------------------
-# TRAIN CTGAN
-# -----------------------------------------------------------
-st.subheader("🤖 Train CTGAN")
+# -------------------------------------------------------------
+# STEP 5 — Train CTGAN
+# -------------------------------------------------------------
+st.subheader("Train CTGAN Model")
+epochs = st.slider("Epochs", 50, 300, 150)
 
-epochs = st.slider("Epochs", 50, 500, 200)
-
-if st.button("Train Model"):
-    with st.spinner("Training CTGAN... this may take a few minutes"):
+if st.button("Train CTGAN"):
+    with st.spinner("Training CTGAN... please wait"):
         try:
             ctgan = CTGAN(epochs=epochs, verbose=True)
-            ctgan.fit(data, categorical_cols)
-            st.success("CTGAN trained successfully!")
+            ctgan.fit(df, categorical_cols)
         except Exception as e:
-            st.error(f"CTGAN training failed: {e}")
+            st.error("CTGAN training FAILED:")
+            st.error(str(e))
             st.stop()
 
-    # -----------------------------------------------------------
-    # GENERATE SYNTHETIC DATA
-    # -----------------------------------------------------------
-    synthetic = ctgan.sample(len(data))
+    st.success("CTGAN Training Complete!")
 
-    st.subheader("🧪 Synthetic Data Preview")
+    # ---------------------------------------------------------
+    # STEP 6 — Generate Synthetic Data
+    # ---------------------------------------------------------
+    synthetic = ctgan.sample(len(df))
+
+    st.subheader("Synthetic Data Preview")
     st.dataframe(synthetic.head())
 
-    # Download
+    # Download button
     buf = BytesIO()
     synthetic.to_csv(buf, index=False)
     st.download_button("Download Synthetic CSV", buf.getvalue(),
-                       file_name="synthetic_data.csv", mime="text/csv")
+                       "synthetic_data.csv", "text/csv")
 
-    # -----------------------------------------------------------
-    # PRIVACY CHECK
-    # -----------------------------------------------------------
-    st.subheader("🔐 Privacy Check")
+    # ---------------------------------------------------------
+    # STEP 7 — Privacy Check (Optional)
+    # ---------------------------------------------------------
+    st.subheader("Privacy Check (Nearest Neighbor Distance)")
 
-    def to_matrix(real_df, syn_df, cat_cols, num_cols):
+    def to_matrix(real, syn, cat_cols, num_cols):
+        # Encode categoricals
         if cat_cols:
             enc = OneHotEncoder(handle_unknown='ignore')
-            enc.fit(pd.concat([real_df[cat_cols], syn_df[cat_cols]], axis=0))
-
-            X_real_cat = enc.transform(real_df[cat_cols]).toarray()
-            X_syn_cat = enc.transform(syn_df[cat_cols]).toarray()
+            all_cat = pd.concat([real[cat_cols], syn[cat_cols]], axis=0)
+            enc.fit(all_cat)
+            Xr_cat = enc.transform(real[cat_cols]).toarray()
+            Xs_cat = enc.transform(syn[cat_cols]).toarray()
         else:
-            X_real_cat = np.zeros((len(real_df), 0))
-            X_syn_cat = np.zeros((len(syn_df), 0))
+            Xr_cat = np.zeros((len(real), 0))
+            Xs_cat = np.zeros((len(syn), 0))
 
-        X_real_num = real_df[num_cols].to_numpy() if num_cols else np.zeros((len(real_df), 0))
-        X_syn_num = syn_df[num_cols].to_numpy() if num_cols else np.zeros((len(syn_df), 0))
+        # Numeric
+        Xr_num = real[num_cols].to_numpy() if num_cols else np.zeros((len(real), 0))
+        Xs_num = syn[num_cols].to_numpy() if num_cols else np.zeros((len(syn), 0))
 
-        return np.hstack([X_real_num, X_real_cat]), np.hstack([X_syn_num, X_syn_cat])
+        return np.hstack([Xr_num, Xr_cat]), np.hstack([Xs_num, Xs_cat])
 
-    X_real, X_syn = to_matrix(data, synthetic, categorical_cols, numerical_cols)
+    X_real, X_syn = to_matrix(df, synthetic, categorical_cols, numeric_cols)
+
     nn = NearestNeighbors(n_neighbors=1).fit(X_real)
     dists, _ = nn.kneighbors(X_syn)
 
-    st.write("Min Distance:", float(np.min(dists)))
-    st.write("Median Distance:", float(np.median(dists)))
-    st.write("Max Distance:", float(np.max(dists)))
+    st.write("Min distance:", float(np.min(dists)))
+    st.write("Median distance:", float(np.median(dists)))
+    st.write("Max distance:", float(np.max(dists)))
 
-    exact_overlap = pd.merge(data.reset_index(drop=True),
-                             synthetic.reset_index(drop=True),
-                             how="inner").shape[0]
+    # Exact row check
+    exact = pd.merge(df.reset_index(drop=True),
+                     synthetic.reset_index(drop=True),
+                     how="inner").shape[0]
 
-    st.write("Exact Row Overlaps:", exact_overlap)
+    st.write("Exact overlapping rows:", int(exact))
