@@ -8,7 +8,7 @@ sdv==1.15.0
 rdt==1.12.1
 
 # Data profiling
-ydata-profiling==4.6.4
+ydata-profiling==4.18.0
 
 # Utilities
 Faker==22.6.0
